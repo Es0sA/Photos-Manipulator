@@ -6,6 +6,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# Install CPU-only torch/torchvision in their own step, with --index-url
+# (not --extra-index-url) so pip can't mix in GPU-flavored wheels from the
+# default PyPI index, which caused a version conflict with basicsr's
+# transitive nvidia-cublas requirement.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.0.1 torchvision==0.15.2
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
