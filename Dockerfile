@@ -35,7 +35,9 @@ RUN mkdir -p /app/models \
 COPY bot.py photo_ops.py ./
 
 # Pre-download facexlib's face detection/parsing weights (used by GFPGAN)
-# so the first real request doesn't stall on it.
-RUN python3 -c "from photo_ops import build_gfpganer; build_gfpganer('/app/models')"
+# and rembg's u2net model, so the first real request doesn't stall on
+# either, and container restarts/recreates don't redownload them.
+RUN python3 -c "from photo_ops import build_gfpganer; build_gfpganer('/app/models')" \
+    && python3 -c "from rembg import new_session; new_session('u2net')"
 
 CMD ["python", "bot.py"]
