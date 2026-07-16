@@ -56,6 +56,14 @@ def build_colorizer(model_dir: str):
     return net
 
 
+def get_image_megapixels(path: str) -> float:
+    from PIL import Image
+
+    with Image.open(path) as img:
+        width, height = img.size
+    return (width * height) / 1_000_000
+
+
 def op_upscale(input_path: str, job_dir: str, scale: int, upsampler) -> str:
     import cv2
 
