@@ -89,13 +89,14 @@ pending_photos: dict = {}
 job_queue: asyncio.Queue = asyncio.Queue()
 pending_jobs = 0
 
-# Models are loaded once at startup and reused for every job; the queue
-# worker processes one job at a time so there's no concurrent-access risk.
-_upsampler_x2 = None
-_upsampler_x4 = None
-_gfpganer = None
-_rembg_session = None
-_colorizer_net = None
+# Models are loaded on demand, right before the job that needs them, and
+# freed immediately after, rather than kept resident for the process
+# lifetime. This host runs several other memory-hungry services alongside
+# this bot, and this bot alone has four separate model families (both
+# Real-ESRGAN scales, GFPGAN, rembg, the colorizer net); keeping all of
+# them loaded at once was enough to trigger OOM kills under load. The
+# queue worker processes one job at a time, so there's no concurrent-access
+# risk in only ever holding one model in memory.
 
 
 @dataclasses.dataclass
@@ -232,7 +233,12 @@ def _estimate_upscale_seconds(input_path: str, op: str) -> float:
 
 
 def _run_operation(input_path: str, job_dir: str, op: str, fmt: str):
+    import gc
+
     from photo_ops import (
+        build_colorizer,
+        build_gfpganer,
+        build_realesrgan,
         op_colorize,
         op_convert,
         op_remove_background,
@@ -240,20 +246,33 @@ def _run_operation(input_path: str, job_dir: str, op: str, fmt: str):
         op_upscale,
     )
 
-    if op == "upscale2":
-        return op_upscale(input_path, job_dir, scale=2, upsampler=_upsampler_x2), "Upscaled 2x"
-    if op == "upscale4":
-        return op_upscale(input_path, job_dir, scale=4, upsampler=_upsampler_x4), "Upscaled 4x"
-    if op == "rembg":
-        return op_remove_background(input_path, job_dir, _rembg_session), "Background removed"
-    if op == "restore":
-        return op_restore(input_path, job_dir, _gfpganer), "Restored"
-    if op == "colorize":
-        return op_colorize(input_path, job_dir, _colorizer_net), "Colorized"
-    if fmt:
-        label = "Compressed" if fmt == "compress" else f"Converted to {fmt.upper()}"
-        return op_convert(input_path, job_dir, fmt), label
-    raise ValueError(f"Unknown operation: op={op} fmt={fmt}")
+    try:
+        if op == "upscale2":
+            upsampler = build_realesrgan(scale=2, model_dir=MODELS_DIR, tile=UPSCALE_TILE_SIZE)
+            return op_upscale(input_path, job_dir, scale=2, upsampler=upsampler), "Upscaled 2x"
+        if op == "upscale4":
+            upsampler = build_realesrgan(scale=4, model_dir=MODELS_DIR, tile=UPSCALE_TILE_SIZE)
+            return op_upscale(input_path, job_dir, scale=4, upsampler=upsampler), "Upscaled 4x"
+        if op == "rembg":
+            from rembg import new_session
+
+            session = new_session("u2net")
+            return op_remove_background(input_path, job_dir, session), "Background removed"
+        if op == "restore":
+            gfpganer = build_gfpganer(model_dir=MODELS_DIR)
+            return op_restore(input_path, job_dir, gfpganer), "Restored"
+        if op == "colorize":
+            net = build_colorizer(model_dir=MODELS_DIR)
+            return op_colorize(input_path, job_dir, net), "Colorized"
+        if fmt:
+            label = "Compressed" if fmt == "compress" else f"Converted to {fmt.upper()}"
+            return op_convert(input_path, job_dir, fmt), label
+        raise ValueError(f"Unknown operation: op={op} fmt={fmt}")
+    finally:
+        # Drop the local model reference and force collection before the
+        # next job runs, so peak memory only ever reflects one loaded model
+        # family at a time instead of accumulating across job types.
+        gc.collect()
 
 
 async def _process_job(job: PhotoJob) -> None:
@@ -319,33 +338,11 @@ async def _queue_worker() -> None:
             job_queue.task_done()
 
 
-def _load_models() -> None:
-    global _upsampler_x2, _upsampler_x4, _gfpganer, _rembg_session, _colorizer_net
-    from photo_ops import build_colorizer, build_gfpganer, build_realesrgan
-    from rembg import new_session
-
-    logger.info("Loading upscaling models...")
-    _upsampler_x2 = build_realesrgan(scale=2, model_dir=MODELS_DIR, tile=UPSCALE_TILE_SIZE)
-    _upsampler_x4 = build_realesrgan(scale=4, model_dir=MODELS_DIR, tile=UPSCALE_TILE_SIZE)
-
-    logger.info("Loading GFPGAN...")
-    _gfpganer = build_gfpganer(model_dir=MODELS_DIR)
-
-    logger.info("Loading background removal session...")
-    _rembg_session = new_session("u2net")
-
-    logger.info("Loading colorization model...")
-    _colorizer_net = build_colorizer(model_dir=MODELS_DIR)
-
-    logger.info("All models loaded.")
-
-
 _queue_worker_task = None
 
 
 async def _post_init(application: Application) -> None:
     global _queue_worker_task
-    await asyncio.get_running_loop().run_in_executor(None, _load_models)
     _queue_worker_task = asyncio.create_task(_queue_worker(), name="photo-queue-worker")
 
 
