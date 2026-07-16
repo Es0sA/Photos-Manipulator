@@ -2,28 +2,6 @@ import os
 from pathlib import Path
 
 
-def build_realesrgan(scale: int, model_dir: str, tile: int):
-    from basicsr.archs.rrdbnet_arch import RRDBNet
-    from realesrgan import RealESRGANer
-
-    if scale == 4:
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-        model_path = os.path.join(model_dir, "RealESRGAN_x4plus.pth")
-    else:
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
-        model_path = os.path.join(model_dir, "RealESRGAN_x2plus.pth")
-
-    return RealESRGANer(
-        scale=scale,
-        model_path=model_path,
-        model=model,
-        tile=tile,
-        tile_pad=10,
-        pre_pad=0,
-        half=False,
-    )
-
-
 def build_gfpganer(model_dir: str):
     from gfpgan import GFPGANer
 
@@ -54,27 +32,6 @@ def build_colorizer(model_dir: str):
     net.getLayer(conv8).blobs = [np.full((1, 313), 2.606, dtype="float32")]
 
     return net
-
-
-def get_image_megapixels(path: str) -> float:
-    from PIL import Image
-
-    with Image.open(path) as img:
-        width, height = img.size
-    return (width * height) / 1_000_000
-
-
-def op_upscale(input_path: str, job_dir: str, scale: int, upsampler) -> str:
-    import cv2
-
-    img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise ValueError("Could not read image")
-
-    output, _ = upsampler.enhance(img, outscale=scale)
-    output_path = os.path.join(job_dir, f"upscaled_{scale}x.png")
-    cv2.imwrite(output_path, output)
-    return output_path
 
 
 def op_remove_background(input_path: str, job_dir: str, session) -> str:
