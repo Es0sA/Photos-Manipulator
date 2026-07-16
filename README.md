@@ -1,15 +1,15 @@
 # Photos Manipulator: Telegram Bot
 
-A Telegram bot that edits photos on request: upscaling, background removal,
-old photo restoration, colorization, and format conversion/compression. Send
-a photo, tap a button, get the result back.
+A Telegram bot that edits photos on request: background removal, old photo
+restoration, colorization, and format conversion/compression. Send a photo,
+tap a button, get the result back.
 
 ## How it works
 
 1. Send the bot a photo, as a compressed photo or, better, as a file
    (paperclip icon) for full original quality.
-2. The bot replies with a menu of buttons: Upscale 2x/4x, Remove Background,
-   Restore Old Photo, Colorize, Convert/Compress.
+2. The bot replies with a menu of buttons: Remove Background, Restore Old
+   Photo, Colorize, Convert/Compress.
 3. Tap one. The bot processes it and sends the result back as a file
    (never as a compressed photo, so resolution and transparency survive).
 4. If you send several photos, they're queued and processed one at a time
@@ -18,8 +18,8 @@ a photo, tap a button, get the result back.
 ## Why this bot needs its own local Bot API server
 
 Telegram's standard (cloud) Bot API caps both downloads and uploads at
-20MB. Upscaled or restored images can exceed that, so this bot runs
-alongside a self-hosted
+20MB. Restored images can exceed that, so this bot runs alongside a
+self-hosted
 [`telegram-bot-api`](https://github.com/tdlib/telegram-bot-api) server (the
 same one Telegram runs, just self-hosted), which raises the limit to
 2000MB. The bot container and the `telegram-bot-api` container share a
@@ -59,15 +59,14 @@ docker compose up -d --build
 docker compose logs -f    # watch it come online / debug
 ```
 
-The first build downloads several hundred MB of model weights
-(Real-ESRGAN, GFPGAN, the colorization model) and bakes them into the
-image, so restarts don't re-download them.
+The first build downloads several hundred MB of model weights (GFPGAN,
+the colorization model) and bakes them into the image, so restarts don't
+re-download them.
 
 ## What each feature actually does
 
 | Feature | Model / method | Notes |
 |---|---|---|
-| Upscale 2x / 4x | Real-ESRGAN | GAN-based upscaling, handles JPEG artifacts better than classic resizing. |
 | Remove Background | rembg (U2Net) | Outputs a transparent PNG. |
 | Restore Old Photo | OpenCV denoise/sharpen + GFPGAN | Denoises and sharpens the full image, then specifically restores detected faces. |
 | Colorize | OpenCV DNN (Zhang et al. colorization) | Classic colorization model, decent results on most black and white photos. |
@@ -75,8 +74,8 @@ image, so restarts don't re-download them.
 
 ## Limits to know about
 
-- This runs on CPU only, no GPU. Upscaling and restoration can take from a
-  few seconds to a few minutes depending on image size.
+- This runs on CPU only, no GPU. Restoration can take from a few seconds
+  to a few minutes depending on image size.
 - Only one photo is processed at a time (see `job_queue` / `_queue_worker`
   in `bot.py`), more sent in the meantime queue up instead of running in
   parallel.

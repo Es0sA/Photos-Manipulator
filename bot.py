@@ -4,7 +4,6 @@ import dataclasses
 import logging
 import os
 import shutil
-import time
 import uuid
 from pathlib import Path
 
@@ -32,27 +31,14 @@ LOCAL_API_BASE_URL = os.getenv("LOCAL_API_BASE_URL", "http://telegram-bot-api:80
 JOBS_DIR = os.getenv("PHOTOS_JOBS_DIR", "/var/lib/telegram-bot-api/_photos_jobs")
 MODELS_DIR = os.getenv("MODELS_DIR", "/app/models")
 
-# Real-ESRGAN tile size: keeps CPU/memory use bounded on large photos at the
-# cost of some speed. Lower this if the host runs low on memory.
-UPSCALE_TILE_SIZE = 200
-
-PROGRESS_UPDATE_INTERVAL = 3  # seconds
-PROGRESS_BAR_LENGTH = 10
-# Rough CPU-only throughput used only for progress-bar timing, not a hard
-# limit -- Real-ESRGAN doesn't expose real tile-by-tile progress.
-ESTIMATED_SECONDS_PER_MEGAPIXEL = {
-    "upscale2": 10,
-    "upscale4": 25,
-}
-
 START_TEXT = (
     "\U0001f5bc️ *Photos Manipulator Bot*\n\n"
-    "Send me a photo and I'll show you what I can do with it: upscale, "
-    "remove the background, restore an old photo, colorize a black and "
-    "white photo, or convert/compress the file.\n\n"
-    "For best results on upscaling, restoration, or colorization, send the "
-    "image as a file (the paperclip icon) rather than a compressed photo, "
-    "so I get the original quality to work with. Send /help for details."
+    "Send me a photo and I'll show you what I can do with it: remove the "
+    "background, restore an old photo, colorize a black and white photo, "
+    "or convert/compress the file.\n\n"
+    "For best results on restoration or colorization, send the image as a "
+    "file (the paperclip icon) rather than a compressed photo, so I get "
+    "the original quality to work with. Send /help for details."
 )
 
 HELP_TEXT = (
@@ -62,22 +48,19 @@ HELP_TEXT = (
     "2. Tap the button for what you want done.\n"
     "3. I'll send the result back as a file.\n\n"
     "*What I can do*\n"
-    "• Upscale 2x or 4x\n"
     "• Remove the background\n"
     "• Restore an old or damaged photo (denoise, sharpen, fix faces)\n"
     "• Colorize a black and white photo\n"
     "• Convert between JPG, PNG, and WEBP, or compress the file\n\n"
     "*Limits*\n"
     "• Only one photo is processed at a time, more queue up in order.\n"
-    "• Upscaling and restoration can take a few minutes on larger images, "
-    "this runs on CPU with no GPU.\n"
+    "• Restoration can take a while on larger images, this runs on CPU "
+    "with no GPU.\n"
     "• I only remember one pending photo per chat, sending a new one "
     "before you pick an action replaces it."
 )
 
 OP_LABELS = {
-    "upscale2": "Upscaling 2x",
-    "upscale4": "Upscaling 4x",
     "rembg": "Removing background",
     "restore": "Restoring photo",
     "colorize": "Colorizing",
@@ -110,10 +93,6 @@ class PhotoJob:
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("Upscale 2x", callback_data="op:upscale2"),
-                InlineKeyboardButton("Upscale 4x", callback_data="op:upscale4"),
-            ],
             [InlineKeyboardButton("Remove Background", callback_data="op:rembg")],
             [InlineKeyboardButton("Restore Old Photo", callback_data="op:restore")],
             [InlineKeyboardButton("Colorize", callback_data="op:colorize")],
@@ -201,58 +180,19 @@ async def _enqueue_job(status_message, attachment, op, fmt) -> None:
     await job_queue.put(PhotoJob(status_message=status_message, attachment=attachment, op=op, fmt=fmt))
 
 
-def _render_progress_bar(fraction: float) -> str:
-    filled = int(fraction * PROGRESS_BAR_LENGTH)
-    bar = "█" * filled + "░" * (PROGRESS_BAR_LENGTH - filled)
-    return f"{bar} {int(fraction * 100)}%"
-
-
-async def _run_progress_updates(status_message, estimated_seconds: float, label: str) -> None:
-    start_time = time.monotonic()
-    try:
-        while True:
-            await asyncio.sleep(PROGRESS_UPDATE_INTERVAL)
-            elapsed = time.monotonic() - start_time
-            # Cap the shown progress short of 100% until the real result is
-            # in, since the estimate can undershoot on a busy or unusually
-            # large image.
-            fraction = min(elapsed / estimated_seconds, 0.95)
-            with contextlib.suppress(Exception):
-                await status_message.edit_text(
-                    f"{label}... {_render_progress_bar(fraction)}\n~{int(elapsed)}s elapsed"
-                )
-    except asyncio.CancelledError:
-        pass
-
-
-def _estimate_upscale_seconds(input_path: str, op: str) -> float:
-    from photo_ops import get_image_megapixels
-
-    megapixels = get_image_megapixels(input_path)
-    return max(megapixels * ESTIMATED_SECONDS_PER_MEGAPIXEL[op], 5)
-
-
 def _run_operation(input_path: str, job_dir: str, op: str, fmt: str):
     import gc
 
     from photo_ops import (
         build_colorizer,
         build_gfpganer,
-        build_realesrgan,
         op_colorize,
         op_convert,
         op_remove_background,
         op_restore,
-        op_upscale,
     )
 
     try:
-        if op == "upscale2":
-            upsampler = build_realesrgan(scale=2, model_dir=MODELS_DIR, tile=UPSCALE_TILE_SIZE)
-            return op_upscale(input_path, job_dir, scale=2, upsampler=upsampler), "Upscaled 2x"
-        if op == "upscale4":
-            upsampler = build_realesrgan(scale=4, model_dir=MODELS_DIR, tile=UPSCALE_TILE_SIZE)
-            return op_upscale(input_path, job_dir, scale=4, upsampler=upsampler), "Upscaled 4x"
         if op == "rembg":
             from rembg import new_session
 
@@ -281,30 +221,13 @@ async def _process_job(job: PhotoJob) -> None:
     os.makedirs(job_dir, exist_ok=True)
     os.chmod(job_dir, 0o755)
 
-    progress_task = None
     try:
         tg_file = await job.attachment.get_file()
         input_path = tg_file.file_path
 
-        if job.op in ESTIMATED_SECONDS_PER_MEGAPIXEL:
-            estimated_seconds = await asyncio.get_running_loop().run_in_executor(
-                None, _estimate_upscale_seconds, input_path, job.op
-            )
-            label = OP_LABELS.get(job.op, "Processing")
-            with contextlib.suppress(Exception):
-                await status_message.edit_text(f"{label}... {_render_progress_bar(0)}")
-            progress_task = asyncio.create_task(
-                _run_progress_updates(status_message, estimated_seconds, label)
-            )
-
         output_path, caption = await asyncio.get_running_loop().run_in_executor(
             None, _run_operation, input_path, job_dir, job.op, job.fmt
         )
-
-        if progress_task:
-            progress_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await progress_task
 
         os.chmod(output_path, 0o644)
         with contextlib.suppress(Exception):
@@ -315,10 +238,6 @@ async def _process_job(job: PhotoJob) -> None:
             await status_message.delete()
     except Exception:
         logger.exception("Processing failed")
-        if progress_task:
-            progress_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await progress_task
         with contextlib.suppress(Exception):
             await status_message.edit_text("Sorry, I couldn't process that image.")
     finally:
